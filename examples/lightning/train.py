@@ -11,9 +11,12 @@ from torch.utils.data import DataLoader, Dataset
 from byol_pytorch import BYOL
 import pytorch_lightning as pl
 
+import apex
+from apex.parallel.LARC import LARC
+
 # test model, a resnet 50
 
-resnet = models.resnet50(pretrained=True)
+resnet = models.resnet50(pretrained=False)
 
 # arguments
 
@@ -26,12 +29,15 @@ args = parser.parse_args()
 
 # constants
 
-BATCH_SIZE = 32
+BATCH_SIZE = 4096
 EPOCHS     = 1000
-LR         = 3e-4
-NUM_GPUS   = 2
-IMAGE_SIZE = 256
+LR         = 0.3
+NUM_GPUS   = 2 # TODO: Modify to actualy ##
+NUM_PROCESSES = 1 # TODO: Modify to actual ##
+IMAGE_SIZE = 224
 IMAGE_EXTS = ['.jpg', '.png', '.jpeg']
+WARMUP_EPOCHS = 5
+ROOT_DIR= '.' # TODO: Modify this for root directory
 NUM_WORKERS = multiprocessing.cpu_count()
 
 # pytorch lightning module
@@ -49,11 +55,30 @@ class SelfSupervisedLearner(pl.LightningModule):
         return {'loss': loss}
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=LR)
+        optimizer = torch.optim.SGD(
+            self.parameters(),
+            lr=LR,
+            momentum=0.9,
+            weight_decay=WEIGHT_DECAY
+        )
+        optimizer = LARC(optimizer, trust_coefficient=0.001, clip=False)
+        warmup_lr_schedule = np.linspace(args.start_warmup, args.base_lr, len(train_loader) * args.warmup_epochs)
+        iters = np.arange(len(train_loader) * (args.epochs - args.warmup_epochs))
+        cosine_lr_schedule = np.array([args.final_lr + 0.5 * (args.base_lr - args.final_lr) * (1 + \
+                             math.cos(math.pi * t / (len(train_loader) * (args.epochs - args.warmup_epochs)))) for t in iters])
+        lr_schedule = np.concatenate((warmup_lr_schedule, cosine_lr_schedule))
+        return optimizer
 
     def on_before_zero_grad(self, _):
         if self.learner.use_momentum:
             self.learner.update_moving_average()
+
+    def optimizer_step(self, epoch, batch_idx optimizer, **kwargs):
+        iteration = epoch * len(train_loader) + batch_idx
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr_schedule[iteration]
+        optimizer.step()
+
 
 # images dataset
 
@@ -105,9 +130,13 @@ if __name__ == '__main__':
     )
 
     trainer = pl.Trainer(
+        default_root_dir=ROOT_DIR,
         gpus = NUM_GPUS,
         max_epochs = EPOCHS,
         accumulate_grad_batches = 1,
+        accelerator='gpu',
+        strategy='ddp',
+        num_processes=NUM_PROCESSES,
         sync_batchnorm = True
     )
 
