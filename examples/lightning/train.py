@@ -1,8 +1,13 @@
+# TODO: Install apex: https://github.com/NVIDIA/apex#quick-start
+
+
 import os
+import math
 import argparse
 import multiprocessing
 from pathlib import Path
 from PIL import Image
+import numpy as np
 
 import torch
 from torchvision import models, transforms
@@ -10,9 +15,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from byol_pytorch import BYOL
 import pytorch_lightning as pl
-
 import apex
 from apex.parallel.LARC import LARC
+
 
 # test model, a resnet 50
 
@@ -31,14 +36,17 @@ args = parser.parse_args()
 
 BATCH_SIZE = 4096
 EPOCHS     = 1000
-LR         = 0.3
+BASE_LR    = 0.3
+FINAL_LR   = 0
+WEIGHT_DECAY = 1.5 * (10**-6)
 NUM_GPUS   = 2 # TODO: Modify to actualy ##
 NUM_PROCESSES = 1 # TODO: Modify to actual ##
 IMAGE_SIZE = 224
 IMAGE_EXTS = ['.jpg', '.png', '.jpeg']
 WARMUP_EPOCHS = 5
+START_WARMUP  = 0
 ROOT_DIR= '.' # TODO: Modify this for root directory
-NUM_WORKERS = multiprocessing.cpu_count()
+NUM_WORKERS = torch.get_num_threads()
 
 # pytorch lightning module
 
@@ -57,27 +65,27 @@ class SelfSupervisedLearner(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(
             self.parameters(),
-            lr=LR,
+            lr=BASE_LR,
             momentum=0.9,
             weight_decay=WEIGHT_DECAY
         )
-        optimizer = LARC(optimizer, trust_coefficient=0.001, clip=False)
-        warmup_lr_schedule = np.linspace(args.start_warmup, args.base_lr, len(train_loader) * args.warmup_epochs)
-        iters = np.arange(len(train_loader) * (args.epochs - args.warmup_epochs))
-        cosine_lr_schedule = np.array([args.final_lr + 0.5 * (args.base_lr - args.final_lr) * (1 + \
-                             math.cos(math.pi * t / (len(train_loader) * (args.epochs - args.warmup_epochs)))) for t in iters])
-        lr_schedule = np.concatenate((warmup_lr_schedule, cosine_lr_schedule))
-        return optimizer
+        self.optimizer = LARC(optimizer)
+        warmup_lr_schedule = np.linspace(START_WARMUP, BASE_LR, len(train_loader) * WARMUP_EPOCHS)
+        iters = np.arange(len(train_loader) * (EPOCHS - WARMUP_EPOCHS))
+        cosine_lr_schedule = np.array([FINAL_LR + 0.5 * (BASE_LR - FINAL_LR) * (1 + \
+                             math.cos(math.pi * t / (len(train_loader) * (EPOCHS - WARMUP_EPOCHS)))) for t in iters])
+        self.lr_schedule = np.concatenate((warmup_lr_schedule, cosine_lr_schedule))
+        #return optimizer
 
     def on_before_zero_grad(self, _):
         if self.learner.use_momentum:
             self.learner.update_moving_average()
 
-    def optimizer_step(self, epoch, batch_idx optimizer, **kwargs):
+    def optimizer_step(self, epoch, batch_idx, optimizer, **kwargs):
         iteration = epoch * len(train_loader) + batch_idx
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr_schedule[iteration]
-        optimizer.step()
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = self.lr_schedule[iteration]
+        self.optimizer.step()
 
 
 # images dataset
