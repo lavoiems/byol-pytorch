@@ -1,11 +1,10 @@
 ## Taken form: https://github.com/NVIDIA/apex/blob/master/apex/parallel/LARC.py
 
 import torch
-from torch import nn
-from torch.nn.parameter import Parameter
+from torch.optim import Optimizer
 
 
-class LARC(object):
+class LARC(Optimizer):
     """
     :class:`LARC` is a pytorch implementation of both the scaling and clipping variants of LARC,
     in which the ratio between gradient and parameter magnitudes is used to calculate an adaptive 
@@ -73,7 +72,7 @@ class LARC(object):
     def add_param_group(self, param_group):
         self.optim.add_param_group( param_group)
 
-    def step(self):
+    def step(self, closure):
         with torch.no_grad():
             weight_decays = []
             for group in self.optim.param_groups:
@@ -99,7 +98,7 @@ class LARC(object):
                         p.grad.data += weight_decay * p.data
                         p.grad.data *= adaptive_lr
 
-        self.optim.step()
+        self.optim.step(closure=closure)
         # return weight decay control to optimizer
         for i, group in enumerate(self.optim.param_groups):
             group['weight_decay'] = weight_decays[i]
