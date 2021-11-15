@@ -15,8 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from byol_pytorch import BYOL
 import pytorch_lightning as pl
-import apex
-from apex.parallel.LARC import LARC
+from LARC import LARC
 
 
 # test model, a resnet 50
